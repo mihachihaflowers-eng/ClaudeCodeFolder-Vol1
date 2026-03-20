@@ -155,6 +155,7 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
             logger=logger, temp_audiofile=temp_audio
         )
 
+        _cleanup_temp(output_file)
         log_func("─" * 45)
         log_func(f"✅ 完成! → {output_file}")
         done_func(True)
