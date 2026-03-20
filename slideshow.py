@@ -46,8 +46,14 @@ def get_music_duration(music_file):
         return None
 
 
+OUTPUT_MODES = {
+    "PC":     {"size": (1920, 1080), "label": "PC（横長 16:9）"},
+    "iPhone": {"size": (1080, 1920), "label": "iPhone（縦長 9:16）"},
+}
+
+
 def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
-                     log_func, photo_progress_cb, encode_progress_cb,
+                     output_mode, log_func, photo_progress_cb, encode_progress_cb,
                      done_func, cancel_event):
     try:
         from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
@@ -89,7 +95,8 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
 
         clips = []
         fade_duration = 0.8  # クロスフェード時間（秒）
-        output_size = (1920, 1080)
+        output_size = OUTPUT_MODES.get(output_mode, OUTPUT_MODES["PC"])["size"]
+        log_func(f"📐 出力モード: {OUTPUT_MODES.get(output_mode, OUTPUT_MODES['PC'])['label']} ({output_size[0]}×{output_size[1]})")
         CrossFadeIn = __import__("moviepy.video.fx", fromlist=["CrossFadeIn"]).CrossFadeIn
 
         for i, img_path in enumerate(image_files):
@@ -155,6 +162,13 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
     except InterruptedError:
         log_func("⛔ キャンセルされました")
         _cleanup_temp(output_file)
+        # 中途半端な出力ファイルも削除
+        if os.path.exists(output_file):
+            try:
+                os.remove(output_file)
+                log_func(f"🗑  中途半端な出力ファイルを削除しました")
+            except Exception:
+                pass
         done_func(False)
     except Exception as e:
         log_func(f"❌ エラー: {e}")
@@ -223,6 +237,24 @@ class App(ctk.CTk):
 
         # 区切り線
         ctk.CTkFrame(left, height=1, fg_color="#333355").pack(fill="x", padx=16, pady=10)
+
+        # 出力モード選択
+        mode_row = ctk.CTkFrame(left, fg_color="transparent")
+        mode_row.pack(fill="x", padx=12, pady=(0, 6))
+        ctk.CTkLabel(mode_row, text="出力モード:", font=ctk.CTkFont(size=12)).pack(side="left", padx=(4, 10))
+        self.mode_var = tk.StringVar(value="PC")
+        ctk.CTkSegmentedButton(
+            mode_row,
+            values=["PC", "iPhone"],
+            variable=self.mode_var,
+            font=ctk.CTkFont(size=12, weight="bold"),
+        ).pack(side="left")
+        self.mode_desc = ctk.CTkLabel(mode_row, text="1920×1080（横長）",
+                                       font=ctk.CTkFont(size=11), text_color="gray")
+        self.mode_desc.pack(side="left", padx=10)
+        self.mode_var.trace_add("write", lambda *_: self.mode_desc.configure(
+            text="1920×1080（横長）" if self.mode_var.get() == "PC" else "1080×1920（縦長）"
+        ))
 
         # 数値設定（横並び）
         num_row = ctk.CTkFrame(left, fg_color="transparent")
@@ -414,6 +446,7 @@ class App(ctk.CTk):
             "music_file":         self.music_var.get(),
             "duration_per_photo": self.duration_var.get(),
             "output_file":        self.output_var.get(),
+            "output_mode":        self.mode_var.get(),
             "log_func":           self._log,
             "photo_progress_cb":  self._set_photo_progress,
             "encode_progress_cb": self._set_encode_progress,
