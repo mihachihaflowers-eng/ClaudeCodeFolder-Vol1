@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>今日の天気</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'Segoe UI', sans-serif;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      color: #fff;
+    }
+
+    .card {
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 24px;
+      padding: 40px;
+      width: 360px;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+    }
+
+    .location {
+      font-size: 1.1rem;
+      color: rgba(255,255,255,0.7);
+      margin-bottom: 8px;
+    }
+
+    .date {
+      font-size: 0.9rem;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 32px;
+    }
+
+    .weather-icon {
+      font-size: 5rem;
+      margin-bottom: 16px;
+      line-height: 1;
+    }
+
+    .description {
+      font-size: 1.2rem;
+      color: rgba(255,255,255,0.85);
+      margin-bottom: 24px;
+    }
+
+    .temperature {
+      font-size: 4rem;
+      font-weight: 700;
+      letter-spacing: -2px;
+      margin-bottom: 32px;
+    }
+
+    .temperature span {
+      font-size: 2rem;
+      font-weight: 300;
+      vertical-align: super;
+    }
+
+    .details {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .detail-item {
+      background: rgba(255,255,255,0.06);
+      border-radius: 12px;
+      padding: 12px;
+    }
+
+    .detail-label {
+      font-size: 0.75rem;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 4px;
+    }
+
+    .detail-value {
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .btn {
+      margin-top: 28px;
+      background: rgba(255,255,255,0.12);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 10px 24px;
+      border-radius: 50px;
+      cursor: pointer;
+      font-size: 0.9rem;
+      transition: background 0.2s;
+    }
+
+    .btn:hover { background: rgba(255,255,255,0.22); }
+
+    .loading { color: rgba(255,255,255,0.6); font-size: 1rem; }
+    .error { color: #ff6b6b; font-size: 0.95rem; line-height: 1.6; }
+  </style>
+</head>
+<body>
+  <div class="card" id="app">
+    <p class="loading">📡 位置情報を取得中...</p>
+  </div>
+
+  <script>
+    const WMO = {
+      0:  ['☀️', '快晴'],
+      1:  ['🌤️', 'ほぼ晴れ'],
+      2:  ['⛅', '一部曇り'],
+      3:  ['☁️', '曇り'],
+      45: ['🌫️', '霧'],
+      48: ['🌫️', '霧氷'],
+      51: ['🌦️', '霧雨（弱）'],
+      53: ['🌦️', '霧雨'],
+      55: ['🌧️', '霧雨（強）'],
+      61: ['🌧️', '小雨'],
+      63: ['🌧️', '雨'],
+      65: ['🌧️', '大雨'],
+      71: ['🌨️', '小雪'],
+      73: ['❄️', '雪'],
+      75: ['❄️', '大雪'],
+      80: ['🌦️', 'にわか雨（弱）'],
+      81: ['🌧️', 'にわか雨'],
+      82: ['⛈️', 'にわか大雨'],
+      95: ['⛈️', '雷雨'],
+      99: ['⛈️', '雹を伴う雷雨'],
+    };
+
+    function getWeatherInfo(code) {
+      return WMO[code] || ['🌡️', '不明'];
+    }
+
+    function formatDate(d) {
+      return `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日（${'日月火水木金土'[d.getDay()]}）`;
+    }
+
+    async function fetchWeather(lat, lon) {
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
+        `&current=temperature_2m,apparent_temperature,weathercode,windspeed_10m,relativehumidity_2m` +
+        `&timezone=auto&forecast_days=1`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('天気データの取得に失敗しました');
+      return res.json();
+    }
+
+    async function fetchLocation(lat, lon) {
+      const res = await fetch(`https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lon}&format=json&accept-language=ja`);
+      const data = await res.json();
+      const addr = data.address;
+      return addr.city || addr.town || addr.village || addr.county || addr.state || '現在地';
+    }
+
+    function render(city, data) {
+      const c = data.current;
+      const [icon, desc] = getWeatherInfo(c.weathercode);
+      const app = document.getElementById('app');
+      app.innerHTML = `
+        <div class="location">📍 ${city}</div>
+        <div class="date">${formatDate(new Date())}</div>
+        <div class="weather-icon">${icon}</div>
+        <div class="description">${desc}</div>
+        <div class="temperature">${Math.round(c.temperature_2m)}<span>°C</span></div>
+        <div class="details">
+          <div class="detail-item">
+            <div class="detail-label">体感温度</div>
+            <div class="detail-value">${Math.round(c.apparent_temperature)}°C</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">湿度</div>
+            <div class="detail-value">${c.relativehumidity_2m}%</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">風速</div>
+            <div class="detail-value">${c.windspeed_10m} km/h</div>
+          </div>
+          <div class="detail-item">
+            <div class="detail-label">更新時刻</div>
+            <div class="detail-value">${new Date().toLocaleTimeString('ja-JP', {hour:'2-digit',minute:'2-digit'})}</div>
+          </div>
+        </div>
+        <button class="btn" onclick="init()">🔄 更新</button>
+      `;
+    }
+
+    function showError(msg) {
+      document.getElementById('app').innerHTML = `<p class="error">⚠️ ${msg}</p><button class="btn" onclick="init()">再試行</button>`;
+    }
+
+    async function init() {
+      document.getElementById('app').innerHTML = '<p class="loading">📡 位置情報を取得中...</p>';
+      try {
+        const pos = await new Promise((resolve, reject) =>
+          navigator.geolocation.getCurrentPosition(resolve, reject, {timeout: 10000})
+        );
+        const { latitude: lat, longitude: lon } = pos.coords;
+        document.getElementById('app').innerHTML = '<p class="loading">🌤️ 天気データを取得中...</p>';
+        const [data, city] = await Promise.all([fetchWeather(lat, lon), fetchLocation(lat, lon)]);
+        render(city, data);
+      } catch (e) {
+        if (e.code === 1) showError('位置情報の許可が必要です。<br>ブラウザの設定から許可してください。');
+        else showError(e.message || '取得に失敗しました。');
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
