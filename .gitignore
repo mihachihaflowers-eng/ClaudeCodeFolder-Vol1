@@ -20,3 +20,8 @@ Thumbs.db
 
 # Claude local settings (contains token)
 .claude/settings.local.json
+
+# 個人データ・生成ファイル
+music/
+picture/
+*.mp4
