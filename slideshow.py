@@ -9,18 +9,49 @@ import random
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
+import customtkinter as ctk
+from proglog import ProgressBarLogger
 
 DEFAULT_PHOTOS_DIR = r"C:\Users\81906\ClaudeCodeFolder\Vol1\picture"
 DEFAULT_MUSIC_FILE = r"C:\Users\81906\ClaudeCodeFolder\Vol1\music\09-手紙 ～拝啓 十五の君へ～.3gp"
 DEFAULT_OUTPUT_FILE = r"C:\Users\81906\ClaudeCodeFolder\Vol1\slideshow.mp4"
 
+ctk.set_appearance_mode("dark")
+ctk.set_default_color_theme("blue")
+
+
+class CancellableLogger(ProgressBarLogger):
+    """MoviePyのエンコード進捗を取得しキャンセルを検知するロガー"""
+    def __init__(self, cancel_event, progress_callback):
+        super().__init__()
+        self._cancel = cancel_event
+        self._progress_cb = progress_callback
+
+    def bars_callback(self, bar, attr, value, old_value=None):
+        if self._cancel.is_set():
+            raise InterruptedError("キャンセルされました")
+        if attr == "index":
+            total = self.bars[bar].get("total", 0)
+            if total and total > 0:
+                self._progress_cb(value / total)
+
+
+def get_music_duration(music_file):
+    """音楽ファイルの長さ（秒）を返す。失敗時は None"""
+    try:
+        from moviepy import AudioFileClip
+        with AudioFileClip(music_file) as a:
+            return a.duration
+    except Exception:
+        return None
+
 
 def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
-                     max_photos, log_func, done_func):
+                     log_func, photo_progress_cb, encode_progress_cb,
+                     done_func, cancel_event):
     try:
         from moviepy import ImageClip, AudioFileClip, concatenate_videoclips
 
-        # 画像ファイルを取得
         all_files = glob.glob(os.path.join(photos_dir, "*"))
         image_files = [
             f for f in all_files
@@ -28,178 +59,328 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
         ]
 
         if not image_files:
-            log_func(f"エラー: {photos_dir} に画像ファイルが見つかりません。")
+            log_func("❌ エラー: 画像ファイルが見つかりません")
             done_func(False)
             return
 
-        # ランダムに選択
+        # 音楽長さとクロスフェードから枚数を自動計算
+        FADE = 0.8
+        max_photos = None
+        if music_file and os.path.exists(music_file):
+            music_duration = get_music_duration(music_file)
+            if music_duration and duration_per_photo > FADE:
+                effective = duration_per_photo - FADE
+                max_photos = max(1, int((music_duration - FADE) / effective) + 1)
+                m, s = divmod(int(music_duration), 60)
+                log_func(f"🎵 音楽の長さ: {m}分{s:02d}秒 ÷ {duration_per_photo:.1f}秒/枚 → {max_photos} 枚")
+
         if max_photos is not None and max_photos < len(image_files):
             image_files = random.sample(image_files, max_photos)
-
         image_files.sort()
 
         total = len(image_files)
         total_sec = total * duration_per_photo
-        log_func(f"写真: {total} 枚をランダム選択")
-        log_func(f"1枚あたり: {duration_per_photo} 秒 / 合計: {total_sec:.0f} 秒 ({total_sec/60:.1f} 分)")
-        log_func("画像を読み込み中...")
+        log_func(f"📂 写真フォルダ: {photos_dir}")
+        log_func(f"🎵 音楽ファイル: {os.path.basename(music_file)}")
+        log_func(f"🖼  写真: {total} 枚をランダム選択")
+        log_func(f"⏱  合計時間: {total_sec:.0f}秒 ({total_sec/60:.1f}分)")
+        log_func("─" * 45)
+        log_func("📥 写真を読み込み中...")
 
         clips = []
-        fade_duration = 0.5
+        fade_duration = 0.8  # クロスフェード時間（秒）
         output_size = (1920, 1080)
+        CrossFadeIn = __import__("moviepy.video.fx", fromlist=["CrossFadeIn"]).CrossFadeIn
 
         for i, img_path in enumerate(image_files):
-            log_func(f"  [{i+1}/{total}] {os.path.basename(img_path)}")
-            clip = (
-                ImageClip(img_path)
-                .resized(output_size)
-                .with_duration(duration_per_photo)
-                .with_effects([
-                    __import__("moviepy.video.fx", fromlist=["CrossFadeIn"]).CrossFadeIn(fade_duration),
-                ])
-            )
+            if cancel_event.is_set():
+                log_func("⛔ キャンセルされました")
+                done_func(False)
+                return
+            log_func(f"  [{i+1:02d}/{total}] {os.path.basename(img_path)}")
+            photo_progress_cb((i + 1) / total)
+            clip = ImageClip(img_path).resized(output_size).with_duration(duration_per_photo)
+            # 最初の1枚以外にクロスフェードを適用
+            if i > 0:
+                clip = clip.with_effects([CrossFadeIn(fade_duration)])
             clips.append(clip)
 
-        log_func("動画を結合中...")
-        video = concatenate_videoclips(clips, method="compose")
+        if cancel_event.is_set():
+            log_func("⛔ キャンセルされました")
+            done_func(False)
+            return
+
+        log_func("─" * 45)
+        log_func("🔗 クリップを結合中（クロスフェード）...")
+        # padding を負にするとクリップが重なり、クロスフェードが発生する
+        video = concatenate_videoclips(clips, method="compose", padding=-fade_duration)
 
         if music_file and os.path.exists(music_file):
-            log_func("音楽を追加中...")
+            log_func("🎵 音楽を追加中...")
             audio = AudioFileClip(music_file)
-            video_duration = video.duration
-
-            if audio.duration < video_duration:
+            if audio.duration < video.duration:
                 from moviepy import concatenate_audioclips
-                loop_count = math.ceil(video_duration / audio.duration)
+                loop_count = math.ceil(video.duration / audio.duration)
                 audio = concatenate_audioclips([audio] * loop_count)
-
-            audio = audio.subclipped(0, video_duration)
+            audio = audio.subclipped(0, video.duration)
             audio = audio.with_effects([
                 __import__("moviepy.audio.fx", fromlist=["AudioFadeOut"]).AudioFadeOut(2)
             ])
             video = video.with_audio(audio)
         elif music_file:
-            log_func(f"警告: 音楽ファイルが見つかりません: {music_file}")
+            log_func(f"⚠️  音楽ファイルが見つかりません")
 
-        log_func(f"動画を出力中: {output_file}")
-        video.write_videofile(output_file, fps=24, codec="libx264", audio_codec="aac",
-                              logger=None)
+        log_func("─" * 45)
+        log_func("🎬 動画をエンコード中...")
+        logger = CancellableLogger(cancel_event, encode_progress_cb)
+        video.write_videofile(
+            output_file, fps=24, codec="libx264", audio_codec="aac", logger=logger
+        )
 
-        log_func(f"\n完成! -> {output_file}")
+        log_func("─" * 45)
+        log_func(f"✅ 完成! → {output_file}")
         done_func(True)
 
+    except InterruptedError:
+        log_func("⛔ キャンセルされました")
+        done_func(False)
     except Exception as e:
-        log_func(f"\nエラーが発生しました: {e}")
+        log_func(f"❌ エラー: {e}")
         done_func(False)
 
 
-class App(tk.Tk):
+class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("スライドショー動画作成")
+        self.title("🎬 スライドショー動画作成")
+        self.geometry("760x780")
         self.resizable(False, False)
+        self._cancel_event = threading.Event()
         self._build_ui()
 
     def _build_ui(self):
-        pad = {"padx": 10, "pady": 5}
+        # ---- タイトル ----
+        title_frame = ctk.CTkFrame(self, fg_color="transparent")
+        title_frame.pack(fill="x", padx=24, pady=(20, 8))
+        ctk.CTkLabel(
+            title_frame, text="🎬 スライドショー動画作成",
+            font=ctk.CTkFont(size=22, weight="bold")
+        ).pack(side="left")
 
-        # --- 写真フォルダ ---
-        tk.Label(self, text="写真フォルダ:").grid(row=0, column=0, sticky="e", **pad)
+        # ---- 設定カード ----
+        card = ctk.CTkFrame(self, corner_radius=12)
+        card.pack(fill="x", padx=24, pady=8)
+
+        def file_row(parent, label, var, browse_cmd, row):
+            ctk.CTkLabel(parent, text=label, width=110, anchor="e").grid(
+                row=row, column=0, padx=(16, 8), pady=8, sticky="e")
+            ctk.CTkEntry(parent, textvariable=var, width=420).grid(
+                row=row, column=1, padx=4, pady=8)
+            ctk.CTkButton(parent, text="参照", width=70, command=browse_cmd).grid(
+                row=row, column=2, padx=(4, 16), pady=8)
+
         self.photos_var = tk.StringVar(value=DEFAULT_PHOTOS_DIR)
-        tk.Entry(self, textvariable=self.photos_var, width=50).grid(row=0, column=1, **pad)
-        tk.Button(self, text="参照", command=self._browse_photos).grid(row=0, column=2, **pad)
-
-        # --- 音楽ファイル ---
-        tk.Label(self, text="音楽ファイル:").grid(row=1, column=0, sticky="e", **pad)
-        self.music_var = tk.StringVar(value=DEFAULT_MUSIC_FILE)
-        tk.Entry(self, textvariable=self.music_var, width=50).grid(row=1, column=1, **pad)
-        tk.Button(self, text="参照", command=self._browse_music).grid(row=1, column=2, **pad)
-
-        # --- 出力ファイル ---
-        tk.Label(self, text="出力ファイル:").grid(row=2, column=0, sticky="e", **pad)
+        self.music_var  = tk.StringVar(value=DEFAULT_MUSIC_FILE)
         self.output_var = tk.StringVar(value=DEFAULT_OUTPUT_FILE)
-        tk.Entry(self, textvariable=self.output_var, width=50).grid(row=2, column=1, **pad)
-        tk.Button(self, text="参照", command=self._browse_output).grid(row=2, column=2, **pad)
 
-        # --- 写真の枚数 ---
-        tk.Label(self, text="写真の枚数:").grid(row=3, column=0, sticky="e", **pad)
-        self.count_var = tk.IntVar(value=20)
-        tk.Spinbox(self, from_=1, to=9999, textvariable=self.count_var, width=10).grid(row=3, column=1, sticky="w", **pad)
+        file_row(card, "写真フォルダ", self.photos_var, self._browse_photos, 0)
+        file_row(card, "音楽ファイル", self.music_var,  self._browse_music,  1)
+        file_row(card, "出力ファイル", self.output_var, self._browse_output, 2)
 
-        # --- 1枚あたりの秒数 ---
-        tk.Label(self, text="1枚あたりの秒数:").grid(row=4, column=0, sticky="e", **pad)
+        # ---- 数値設定 ----
+        num_frame = ctk.CTkFrame(self, fg_color="transparent")
+        num_frame.pack(fill="x", padx=24, pady=4)
+
+        # 1枚あたりの秒数
+        dur_box = ctk.CTkFrame(num_frame, corner_radius=10)
+        dur_box.pack(side="left", expand=True, fill="x", padx=6)
+        ctk.CTkLabel(dur_box, text="1枚あたりの秒数", font=ctk.CTkFont(size=12)).pack(pady=(10, 2))
         self.duration_var = tk.DoubleVar(value=3.0)
-        tk.Spinbox(self, from_=1, to=30, increment=0.5, textvariable=self.duration_var, width=10).grid(row=4, column=1, sticky="w", **pad)
+        ctk.CTkEntry(dur_box, textvariable=self.duration_var, width=100, justify="center",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 10))
 
-        # --- 実行ボタン ---
-        self.run_btn = tk.Button(self, text="動画を作成", command=self._run,
-                                  bg="#4CAF50", fg="white", font=("", 11, "bold"), padx=10)
-        self.run_btn.grid(row=5, column=0, columnspan=3, pady=10)
+        # 自動計算された枚数表示
+        count_box = ctk.CTkFrame(num_frame, corner_radius=10)
+        count_box.pack(side="left", expand=True, fill="x", padx=6)
+        ctk.CTkLabel(count_box, text="写真の枚数（自動計算）", font=ctk.CTkFont(size=12)).pack(pady=(10, 2))
+        self.count_label = ctk.CTkLabel(count_box, text="— 枚",
+                                         font=ctk.CTkFont(size=18, weight="bold"),
+                                         text_color="#4fa3e0")
+        self.count_label.pack()
+        self.count_detail_label = ctk.CTkLabel(count_box, text="",
+                                                font=ctk.CTkFont(size=10),
+                                                text_color="gray")
+        self.count_detail_label.pack(pady=(0, 10))
 
-        # --- ログ ---
-        tk.Label(self, text="進捗ログ:").grid(row=6, column=0, sticky="nw", **pad)
-        self.log_text = tk.Text(self, width=65, height=15, state="disabled", bg="#f5f5f5")
-        self.log_text.grid(row=6, column=1, columnspan=2, **pad)
+        # 秒数・音楽ファイルが変わったら枚数を再計算
+        self.duration_var.trace_add("write", lambda *_: self._update_count())
+        self.music_var.trace_add("write", lambda *_: self._update_count())
+        self._update_count()
 
-        scrollbar = tk.Scrollbar(self, command=self.log_text.yview)
-        scrollbar.grid(row=6, column=3, sticky="ns", pady=5)
-        self.log_text.config(yscrollcommand=scrollbar.set)
+        # ---- プログレスバー ----
+        prog_card = ctk.CTkFrame(self, corner_radius=12)
+        prog_card.pack(fill="x", padx=24, pady=8)
 
+        ctk.CTkLabel(prog_card, text="写真の読み込み",
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(12, 0))
+        self.photo_bar = ctk.CTkProgressBar(prog_card, height=14, corner_radius=7)
+        self.photo_bar.pack(fill="x", padx=16, pady=(4, 2))
+        self.photo_bar.set(0)
+        self.photo_label = ctk.CTkLabel(prog_card, text="0%",
+                                         font=ctk.CTkFont(size=11), text_color="gray")
+        self.photo_label.pack(anchor="e", padx=16)
+
+        ctk.CTkLabel(prog_card, text="動画エンコード",
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(8, 0))
+        self.encode_bar = ctk.CTkProgressBar(prog_card, height=14, corner_radius=7,
+                                              progress_color="#e05c5c")
+        self.encode_bar.pack(fill="x", padx=16, pady=(4, 2))
+        self.encode_bar.set(0)
+        self.encode_label = ctk.CTkLabel(prog_card, text="0%",
+                                          font=ctk.CTkFont(size=11), text_color="gray")
+        self.encode_label.pack(anchor="e", padx=16, pady=(0, 12))
+
+        # ---- ログ ----
+        log_card = ctk.CTkFrame(self, corner_radius=12)
+        log_card.pack(fill="both", expand=True, padx=24, pady=8)
+        ctk.CTkLabel(log_card, text="進捗ログ",
+                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(10, 4))
+        self.log_box = ctk.CTkTextbox(log_card, font=ctk.CTkFont(family="Consolas", size=11),
+                                       fg_color="#1a1a2e", corner_radius=8)
+        self.log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.log_box.configure(state="disabled")
+
+        # ---- ボタン ----
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=24, pady=(4, 20))
+
+        self.run_btn = ctk.CTkButton(
+            btn_frame, text="▶  動画を作成", height=44,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=10, command=self._run
+        )
+        self.run_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
+
+        self.stop_btn = ctk.CTkButton(
+            btn_frame, text="■  中断", height=44,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            corner_radius=10, fg_color="#c0392b", hover_color="#922b21",
+            command=self._stop, state="disabled"
+        )
+        self.stop_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
+
+    # ---- 枚数自動計算 ----
+    def _update_count(self):
+        def _calc():
+            music = self.music_var.get()
+            try:
+                dur = self.duration_var.get()
+            except Exception:
+                dur = 3.0
+            FADE = 0.8  # クロスフェード時間（slideshow.pyと同じ値）
+            if music and os.path.exists(music) and dur > FADE:
+                music_dur = get_music_duration(music)
+                if music_dur:
+                    # クロスフェード分を考慮した正確な計算
+                    # 合計時間 = (N-1)*(dur-FADE) + dur = N*dur - (N-1)*FADE
+                    # → N = (music_dur - FADE) / (dur - FADE) + 1 を整数に
+                    effective = dur - FADE
+                    count = max(1, int((music_dur - FADE) / effective) + 1)
+                    m, s = divmod(int(music_dur), 60)
+                    detail = f"{m}分{s:02d}秒 ÷ {dur:.1f}秒/枚"
+                    def _upd(c=count, d=detail):
+                        self.count_label.configure(text=f"{c} 枚")
+                        self.count_detail_label.configure(text=d)
+                    self.after(0, _upd)
+                    return
+            def _reset():
+                self.count_label.configure(text="— 枚")
+                self.count_detail_label.configure(text="音楽ファイルを選択してください")
+            self.after(0, _reset)
+        threading.Thread(target=_calc, daemon=True).start()
+
+    # ---- ファイル選択 ----
     def _browse_photos(self):
-        path = filedialog.askdirectory(initialdir=self.photos_var.get())
-        if path:
-            self.photos_var.set(path)
+        p = filedialog.askdirectory(initialdir=self.photos_var.get())
+        if p: self.photos_var.set(p)
 
     def _browse_music(self):
-        path = filedialog.askopenfilename(
+        p = filedialog.askopenfilename(
             initialdir=os.path.dirname(self.music_var.get()),
-            filetypes=[("音楽ファイル", "*.mp3 *.3gp *.m4a *.wav *.aac"), ("すべてのファイル", "*.*")]
+            filetypes=[("音楽ファイル", "*.mp3 *.3gp *.m4a *.wav *.aac"), ("すべて", "*.*")]
         )
-        if path:
-            self.music_var.set(path)
+        if p: self.music_var.set(p)
 
     def _browse_output(self):
-        path = filedialog.asksaveasfilename(
+        p = filedialog.asksaveasfilename(
             initialdir=os.path.dirname(self.output_var.get()),
-            defaultextension=".mp4",
-            filetypes=[("MP4動画", "*.mp4")]
+            defaultextension=".mp4", filetypes=[("MP4動画", "*.mp4")]
         )
-        if path:
-            self.output_var.set(path)
+        if p: self.output_var.set(p)
 
-    def _log(self, message):
-        def _update():
-            self.log_text.config(state="normal")
-            self.log_text.insert("end", message + "\n")
-            self.log_text.see("end")
-            self.log_text.config(state="disabled")
-        self.after(0, _update)
+    # ---- ログ更新 ----
+    def _log(self, msg):
+        def _upd():
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", msg + "\n")
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
+        self.after(0, _upd)
 
+    # ---- プログレス更新 ----
+    def _set_photo_progress(self, v):
+        def _upd():
+            self.photo_bar.set(v)
+            self.photo_label.configure(text=f"{v*100:.0f}%")
+        self.after(0, _upd)
+
+    def _set_encode_progress(self, v):
+        def _upd():
+            self.encode_bar.set(v)
+            self.encode_label.configure(text=f"{v*100:.0f}%")
+        self.after(0, _upd)
+
+    # ---- 完了 ----
     def _done(self, success):
-        def _update():
-            self.run_btn.config(state="normal", text="動画を作成")
+        def _upd():
+            self.run_btn.configure(state="normal", text="▶  動画を作成")
+            self.stop_btn.configure(state="disabled")
             if success:
-                messagebox.showinfo("完成", f"動画を保存しました:\n{self.output_var.get()}")
+                messagebox.showinfo("完成 🎉", f"動画を保存しました:\n{self.output_var.get()}")
             else:
-                messagebox.showerror("エラー", "動画の作成に失敗しました。\nログを確認してください。")
-        self.after(0, _update)
+                messagebox.showerror("エラー / キャンセル", "動画の作成を完了できませんでした。\nログを確認してください。")
+        self.after(0, _upd)
 
+    # ---- 実行 ----
     def _run(self):
-        self.run_btn.config(state="disabled", text="処理中...")
-        self.log_text.config(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.config(state="disabled")
+        self._cancel_event.clear()
+        self.run_btn.configure(state="disabled", text="処理中...")
+        self.stop_btn.configure(state="normal")
+        self.photo_bar.set(0)
+        self.encode_bar.set(0)
+        self.photo_label.configure(text="0%")
+        self.encode_label.configure(text="0%")
+        self.log_box.configure(state="normal")
+        self.log_box.delete("1.0", "end")
+        self.log_box.configure(state="disabled")
 
-        thread = threading.Thread(target=create_slideshow, kwargs={
-            "photos_dir": self.photos_var.get(),
-            "music_file": self.music_var.get(),
+        threading.Thread(target=create_slideshow, kwargs={
+            "photos_dir":         self.photos_var.get(),
+            "music_file":         self.music_var.get(),
             "duration_per_photo": self.duration_var.get(),
-            "output_file": self.output_var.get(),
-            "max_photos": self.count_var.get(),
-            "log_func": self._log,
-            "done_func": self._done,
-        }, daemon=True)
-        thread.start()
+            "output_file":        self.output_var.get(),
+            "log_func":           self._log,
+            "photo_progress_cb":  self._set_photo_progress,
+            "encode_progress_cb": self._set_encode_progress,
+            "done_func":          self._done,
+            "cancel_event":       self._cancel_event,
+        }, daemon=True).start()
+
+    # ---- 中断 ----
+    def _stop(self):
+        self._cancel_event.set()
+        self.stop_btn.configure(state="disabled", text="中断中...")
+        self._log("⛔ 中断リクエストを送信しました...")
 
 
 if __name__ == "__main__":
