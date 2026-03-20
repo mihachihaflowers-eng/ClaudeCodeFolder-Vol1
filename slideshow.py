@@ -132,9 +132,20 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
 
         log_func("─" * 45)
         log_func("🎬 動画をエンコード中...")
+
+        # 一時音声ファイルのパスを出力先フォルダに明示指定
+        output_dir = os.path.dirname(os.path.abspath(output_file))
+        temp_audio = os.path.join(output_dir, "TEMP_slideshow_audio.mp4")
+        if os.path.exists(temp_audio):
+            try:
+                os.remove(temp_audio)
+            except Exception:
+                pass
+
         logger = CancellableLogger(cancel_event, encode_progress_cb)
         video.write_videofile(
-            output_file, fps=24, codec="libx264", audio_codec="aac", logger=logger
+            output_file, fps=24, codec="libx264", audio_codec="aac",
+            logger=logger, temp_audiofile=temp_audio
         )
 
         log_func("─" * 45)
@@ -143,17 +154,30 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
 
     except InterruptedError:
         log_func("⛔ キャンセルされました")
+        _cleanup_temp(output_file)
         done_func(False)
     except Exception as e:
         log_func(f"❌ エラー: {e}")
+        _cleanup_temp(output_file)
         done_func(False)
+
+
+def _cleanup_temp(output_file):
+    """中断・エラー時の一時ファイルを削除"""
+    output_dir = os.path.dirname(os.path.abspath(output_file))
+    tmp = os.path.join(output_dir, "TEMP_slideshow_audio.mp4")
+    if os.path.exists(tmp):
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
 
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("🎬 スライドショー動画作成")
-        self.geometry("760x780")
+        self.geometry("1100x560")
         self.resizable(False, False)
         self._cancel_event = threading.Event()
         self._build_ui()
@@ -161,113 +185,134 @@ class App(ctk.CTk):
     def _build_ui(self):
         # ---- タイトル ----
         title_frame = ctk.CTkFrame(self, fg_color="transparent")
-        title_frame.pack(fill="x", padx=24, pady=(20, 8))
+        title_frame.pack(fill="x", padx=24, pady=(16, 8))
         ctk.CTkLabel(
             title_frame, text="🎬 スライドショー動画作成",
-            font=ctk.CTkFont(size=22, weight="bold")
+            font=ctk.CTkFont(size=20, weight="bold")
         ).pack(side="left")
 
-        # ---- 設定カード ----
-        card = ctk.CTkFrame(self, corner_radius=12)
-        card.pack(fill="x", padx=24, pady=8)
+        # ---- メインエリア（左右2列） ----
+        main = ctk.CTkFrame(self, fg_color="transparent")
+        main.pack(fill="both", expand=True, padx=16, pady=(0, 8))
+        main.columnconfigure(0, weight=3)
+        main.columnconfigure(1, weight=2)
+        main.rowconfigure(0, weight=1)
 
-        def file_row(parent, label, var, browse_cmd, row):
-            ctk.CTkLabel(parent, text=label, width=110, anchor="e").grid(
-                row=row, column=0, padx=(16, 8), pady=8, sticky="e")
-            ctk.CTkEntry(parent, textvariable=var, width=420).grid(
-                row=row, column=1, padx=4, pady=8)
-            ctk.CTkButton(parent, text="参照", width=70, command=browse_cmd).grid(
-                row=row, column=2, padx=(4, 16), pady=8)
+        # ======== 左カラム：設定 ========
+        left = ctk.CTkFrame(main, corner_radius=12)
+        left.grid(row=0, column=0, sticky="nsew", padx=(8, 6), pady=4)
+
+        ctk.CTkLabel(left, text="設定", font=ctk.CTkFont(size=13, weight="bold")).pack(
+            anchor="w", padx=16, pady=(12, 6))
+
+        def file_row(label, var, browse_cmd):
+            row = ctk.CTkFrame(left, fg_color="transparent")
+            row.pack(fill="x", padx=12, pady=3)
+            ctk.CTkLabel(row, text=label, width=100, anchor="e",
+                         font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 6))
+            ctk.CTkEntry(row, textvariable=var).pack(side="left", expand=True, fill="x", padx=(0, 6))
+            ctk.CTkButton(row, text="参照", width=60, command=browse_cmd).pack(side="left")
 
         self.photos_var = tk.StringVar(value=DEFAULT_PHOTOS_DIR)
         self.music_var  = tk.StringVar(value=DEFAULT_MUSIC_FILE)
         self.output_var = tk.StringVar(value=DEFAULT_OUTPUT_FILE)
 
-        file_row(card, "写真フォルダ", self.photos_var, self._browse_photos, 0)
-        file_row(card, "音楽ファイル", self.music_var,  self._browse_music,  1)
-        file_row(card, "出力ファイル", self.output_var, self._browse_output, 2)
+        file_row("写真フォルダ", self.photos_var, self._browse_photos)
+        file_row("音楽ファイル", self.music_var,  self._browse_music)
+        file_row("出力ファイル", self.output_var, self._browse_output)
 
-        # ---- 数値設定 ----
-        num_frame = ctk.CTkFrame(self, fg_color="transparent")
-        num_frame.pack(fill="x", padx=24, pady=4)
+        # 区切り線
+        ctk.CTkFrame(left, height=1, fg_color="#333355").pack(fill="x", padx=16, pady=10)
+
+        # 数値設定（横並び）
+        num_row = ctk.CTkFrame(left, fg_color="transparent")
+        num_row.pack(fill="x", padx=12, pady=4)
 
         # 1枚あたりの秒数
-        dur_box = ctk.CTkFrame(num_frame, corner_radius=10)
-        dur_box.pack(side="left", expand=True, fill="x", padx=6)
-        ctk.CTkLabel(dur_box, text="1枚あたりの秒数", font=ctk.CTkFont(size=12)).pack(pady=(10, 2))
+        dur_box = ctk.CTkFrame(num_row, corner_radius=10)
+        dur_box.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        ctk.CTkLabel(dur_box, text="1枚あたりの秒数", font=ctk.CTkFont(size=11)).pack(pady=(8, 2))
         self.duration_var = tk.DoubleVar(value=3.0)
-        ctk.CTkEntry(dur_box, textvariable=self.duration_var, width=100, justify="center",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(0, 10))
+        ctk.CTkEntry(dur_box, textvariable=self.duration_var, width=90, justify="center",
+                     font=ctk.CTkFont(size=20, weight="bold")).pack(pady=(0, 8))
 
-        # 自動計算された枚数表示
-        count_box = ctk.CTkFrame(num_frame, corner_radius=10)
-        count_box.pack(side="left", expand=True, fill="x", padx=6)
-        ctk.CTkLabel(count_box, text="写真の枚数（自動計算）", font=ctk.CTkFont(size=12)).pack(pady=(10, 2))
+        # 自動計算された枚数
+        count_box = ctk.CTkFrame(num_row, corner_radius=10)
+        count_box.pack(side="left", expand=True, fill="x")
+        ctk.CTkLabel(count_box, text="写真の枚数（自動計算）", font=ctk.CTkFont(size=11)).pack(pady=(8, 2))
         self.count_label = ctk.CTkLabel(count_box, text="— 枚",
-                                         font=ctk.CTkFont(size=18, weight="bold"),
+                                         font=ctk.CTkFont(size=20, weight="bold"),
                                          text_color="#4fa3e0")
         self.count_label.pack()
         self.count_detail_label = ctk.CTkLabel(count_box, text="",
                                                 font=ctk.CTkFont(size=10),
                                                 text_color="gray")
-        self.count_detail_label.pack(pady=(0, 10))
+        self.count_detail_label.pack(pady=(0, 8))
 
-        # 秒数・音楽ファイルが変わったら枚数を再計算
         self.duration_var.trace_add("write", lambda *_: self._update_count())
         self.music_var.trace_add("write", lambda *_: self._update_count())
         self._update_count()
 
-        # ---- プログレスバー ----
-        prog_card = ctk.CTkFrame(self, corner_radius=12)
-        prog_card.pack(fill="x", padx=24, pady=8)
-
-        ctk.CTkLabel(prog_card, text="写真の読み込み",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(12, 0))
-        self.photo_bar = ctk.CTkProgressBar(prog_card, height=14, corner_radius=7)
-        self.photo_bar.pack(fill="x", padx=16, pady=(4, 2))
-        self.photo_bar.set(0)
-        self.photo_label = ctk.CTkLabel(prog_card, text="0%",
-                                         font=ctk.CTkFont(size=11), text_color="gray")
-        self.photo_label.pack(anchor="e", padx=16)
-
-        ctk.CTkLabel(prog_card, text="動画エンコード",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(8, 0))
-        self.encode_bar = ctk.CTkProgressBar(prog_card, height=14, corner_radius=7,
-                                              progress_color="#e05c5c")
-        self.encode_bar.pack(fill="x", padx=16, pady=(4, 2))
-        self.encode_bar.set(0)
-        self.encode_label = ctk.CTkLabel(prog_card, text="0%",
-                                          font=ctk.CTkFont(size=11), text_color="gray")
-        self.encode_label.pack(anchor="e", padx=16, pady=(0, 12))
-
-        # ---- ログ ----
-        log_card = ctk.CTkFrame(self, corner_radius=12)
-        log_card.pack(fill="both", expand=True, padx=24, pady=8)
-        ctk.CTkLabel(log_card, text="進捗ログ",
-                     font=ctk.CTkFont(size=12)).pack(anchor="w", padx=16, pady=(10, 4))
-        self.log_box = ctk.CTkTextbox(log_card, font=ctk.CTkFont(family="Consolas", size=11),
-                                       fg_color="#1a1a2e", corner_radius=8)
-        self.log_box.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        self.log_box.configure(state="disabled")
-
-        # ---- ボタン ----
-        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
-        btn_frame.pack(fill="x", padx=24, pady=(4, 20))
+        # ボタン（左カラム下部）
+        btn_frame = ctk.CTkFrame(left, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=12, pady=(12, 14))
 
         self.run_btn = ctk.CTkButton(
-            btn_frame, text="▶  動画を作成", height=44,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            btn_frame, text="▶  動画を作成", height=42,
+            font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=10, command=self._run
         )
-        self.run_btn.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        self.run_btn.pack(side="left", expand=True, fill="x", padx=(0, 6))
 
         self.stop_btn = ctk.CTkButton(
-            btn_frame, text="■  中断", height=44,
-            font=ctk.CTkFont(size=14, weight="bold"),
+            btn_frame, text="■  中断", height=42,
+            font=ctk.CTkFont(size=13, weight="bold"),
             corner_radius=10, fg_color="#c0392b", hover_color="#922b21",
             command=self._stop, state="disabled"
         )
-        self.stop_btn.pack(side="left", expand=True, fill="x", padx=(8, 0))
+        self.stop_btn.pack(side="left", expand=True, fill="x")
+
+        # ======== 右カラム：進捗＋ログ ========
+        right = ctk.CTkFrame(main, corner_radius=12)
+        right.grid(row=0, column=1, sticky="nsew", padx=(6, 8), pady=4)
+        right.rowconfigure(1, weight=1)
+        right.columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(right, text="進捗", font=ctk.CTkFont(size=13, weight="bold")).grid(
+            row=0, column=0, sticky="w", padx=16, pady=(12, 4))
+
+        # プログレスバー
+        prog = ctk.CTkFrame(right, fg_color="transparent")
+        prog.grid(row=0, column=0, sticky="ew", padx=12, pady=(28, 0))
+
+        ctk.CTkLabel(prog, text="写真の読み込み", font=ctk.CTkFont(size=11)).pack(anchor="w")
+        bar_row1 = ctk.CTkFrame(prog, fg_color="transparent")
+        bar_row1.pack(fill="x", pady=(2, 6))
+        self.photo_bar = ctk.CTkProgressBar(bar_row1, height=12, corner_radius=6)
+        self.photo_bar.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        self.photo_bar.set(0)
+        self.photo_label = ctk.CTkLabel(bar_row1, text="0%", width=36,
+                                         font=ctk.CTkFont(size=11), text_color="gray")
+        self.photo_label.pack(side="left")
+
+        ctk.CTkLabel(prog, text="動画エンコード", font=ctk.CTkFont(size=11)).pack(anchor="w")
+        bar_row2 = ctk.CTkFrame(prog, fg_color="transparent")
+        bar_row2.pack(fill="x", pady=(2, 0))
+        self.encode_bar = ctk.CTkProgressBar(bar_row2, height=12, corner_radius=6,
+                                              progress_color="#e05c5c")
+        self.encode_bar.pack(side="left", expand=True, fill="x", padx=(0, 8))
+        self.encode_bar.set(0)
+        self.encode_label = ctk.CTkLabel(bar_row2, text="0%", width=36,
+                                          font=ctk.CTkFont(size=11), text_color="gray")
+        self.encode_label.pack(side="left")
+
+        # ログ
+        ctk.CTkLabel(right, text="進捗ログ", font=ctk.CTkFont(size=11)).grid(
+            row=1, column=0, sticky="w", padx=16, pady=(12, 2))
+        self.log_box = ctk.CTkTextbox(right, font=ctk.CTkFont(family="Consolas", size=10),
+                                       fg_color="#1a1a2e", corner_radius=8)
+        self.log_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(28, 12))
+        self.log_box.configure(state="disabled")
 
     # ---- 枚数自動計算 ----
     def _update_count(self):
