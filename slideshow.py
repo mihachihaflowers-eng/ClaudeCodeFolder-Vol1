@@ -125,11 +125,7 @@ def create_slideshow(photos_dir, music_file, duration_per_photo, output_file,
         if music_file and os.path.exists(music_file):
             log_func("🎵 音楽を追加中...")
             audio = AudioFileClip(music_file)
-            if audio.duration < video.duration:
-                from moviepy import concatenate_audioclips
-                loop_count = math.ceil(video.duration / audio.duration)
-                audio = concatenate_audioclips([audio] * loop_count)
-            audio = audio.subclipped(0, video.duration)
+            audio = audio.subclipped(0, min(audio.duration, video.duration))
             audio = audio.with_effects([
                 __import__("moviepy.audio.fx", fromlist=["AudioFadeOut"]).AudioFadeOut(2)
             ])
